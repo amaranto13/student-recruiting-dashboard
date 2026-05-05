@@ -1,6 +1,6 @@
 import os
 from datetime import date
-from flask import Flask, render_template, request, redirect, url_for, flash
+from flask import Flask, render_template, request, redirect, url_for, flash, session
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import text
 
@@ -24,6 +24,7 @@ class Application(db.Model):
     __tablename__ = "applications"
 
     id = db.Column(db.Integer, primary_key=True)
+    user_code = db.Column(db.String(100), nullable=False, server_default="")
     application_number = db.Column(db.String(100), nullable=False)
     company = db.Column(db.String(200), nullable=False)
     role = db.Column(db.String(200), nullable=False)
@@ -41,6 +42,7 @@ class Application(db.Model):
     def to_dict(self):
         return {
             "id": self.id,
+            "user_code": self.user_code,
             "application_number": self.application_number,
             "company": self.company,
             "role": self.role,
@@ -54,6 +56,16 @@ class Application(db.Model):
 def init_db():
     with app.app_context():
         db.create_all()
+        # Migration: add user_code column to existing tables that pre-date this feature.
+        # The try/except is safe — it silently skips if the column already exists.
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(
+                    text("ALTER TABLE applications ADD COLUMN user_code VARCHAR(100) NOT NULL DEFAULT ''")
+                )
+                conn.commit()
+        except Exception:
+            pass
 
 
 # Run schema init at import time so gunicorn (production) and the dev server
@@ -100,6 +112,46 @@ def _validate_form(form):
 
 
 # ---------------------------------------------------------------------------
+# Auth guard — redirect to login unless the user has a session user_code
+# ---------------------------------------------------------------------------
+
+# Endpoints that don't require a logged-in user
+_PUBLIC_ENDPOINTS = {"login", "change_user", "static"}
+
+
+@app.before_request
+def require_login():
+    if request.endpoint not in _PUBLIC_ENDPOINTS and "user_code" not in session:
+        return redirect(url_for("login"))
+
+
+# ---------------------------------------------------------------------------
+# Login / identity routes
+# ---------------------------------------------------------------------------
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        user_code = request.form.get("user_code", "").strip()
+        if not user_code:
+            flash("Please enter your name or user code.", "danger")
+            return render_template("login.html")
+        session["user_code"] = user_code
+        return redirect(url_for("index"))
+    # Already logged in → go to dashboard
+    if "user_code" in session:
+        return redirect(url_for("index"))
+    return render_template("login.html")
+
+
+@app.route("/change-user", methods=["POST"])
+def change_user():
+    session.pop("user_code", None)
+    flash("User changed. Please enter a new name or code.", "info")
+    return redirect(url_for("login"))
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -110,12 +162,19 @@ def index():
 
 @app.route("/applications")
 def applications():
-    apps = Application.query.order_by(Application.last_updated.desc()).all()
+    user_code = session["user_code"]
+    apps = (
+        Application.query
+        .filter_by(user_code=user_code)
+        .order_by(Application.last_updated.desc())
+        .all()
+    )
     return render_template("applications.html", applications=apps)
 
 
 @app.route("/applications/new", methods=["GET", "POST"])
 def add_entry():
+    user_code = session["user_code"]
     if request.method == "POST":
         errors = _validate_form(request.form)
         if errors:
@@ -129,6 +188,7 @@ def add_entry():
             )
 
         app_entry = Application(
+            user_code=user_code,
             application_number=request.form["application_number"].strip(),
             company=request.form["company"].strip(),
             role=request.form["role"].strip(),
@@ -153,6 +213,9 @@ def add_entry():
 @app.route("/applications/<int:app_id>")
 def application_detail(app_id):
     application = Application.query.get_or_404(app_id)
+    if application.user_code != session["user_code"]:
+        flash("You don't have access to that application.", "danger")
+        return redirect(url_for("applications"))
     return render_template(
         "details.html",
         application=application,
@@ -164,6 +227,9 @@ def application_detail(app_id):
 @app.route("/applications/<int:app_id>/edit", methods=["POST"])
 def edit_application(app_id):
     application = Application.query.get_or_404(app_id)
+    if application.user_code != session["user_code"]:
+        flash("You don't have access to that application.", "danger")
+        return redirect(url_for("applications"))
 
     errors = _validate_form(request.form)
     if errors:
@@ -192,6 +258,9 @@ def edit_application(app_id):
 @app.route("/applications/<int:app_id>/delete", methods=["POST"])
 def delete_application(app_id):
     application = Application.query.get_or_404(app_id)
+    if application.user_code != session["user_code"]:
+        flash("You don't have access to that application.", "danger")
+        return redirect(url_for("applications"))
     db.session.delete(application)
     db.session.commit()
     flash("Application deleted.", "info")
@@ -205,10 +274,12 @@ def next_actions():
 
 @app.route("/next-actions/upcoming")
 def upcoming_actions():
+    user_code = session["user_code"]
     today = date.today().isoformat()
     apps = (
         Application.query
         .filter(
+            Application.user_code == user_code,
             Application.next_action_due_date >= today,
             Application.next_action != "None",
         )
@@ -220,10 +291,12 @@ def upcoming_actions():
 
 @app.route("/next-actions/overdue")
 def overdue_actions():
+    user_code = session["user_code"]
     today = date.today().isoformat()
     apps = (
         Application.query
         .filter(
+            Application.user_code == user_code,
             Application.next_action_due_date < today,
             Application.next_action != "None",
         )
@@ -235,10 +308,12 @@ def overdue_actions():
 
 @app.route("/weekly-review")
 def weekly_review():
+    user_code = session["user_code"]
     today = date.today().isoformat()
     upcoming = (
         Application.query
         .filter(
+            Application.user_code == user_code,
             Application.next_action_due_date >= today,
             Application.next_action != "None",
         )
@@ -248,6 +323,7 @@ def weekly_review():
     overdue = (
         Application.query
         .filter(
+            Application.user_code == user_code,
             Application.next_action_due_date < today,
             Application.next_action != "None",
         )
@@ -259,7 +335,13 @@ def weekly_review():
 
 @app.route("/status-history")
 def status_history():
-    apps = Application.query.order_by(Application.last_updated.desc()).all()
+    user_code = session["user_code"]
+    apps = (
+        Application.query
+        .filter_by(user_code=user_code)
+        .order_by(Application.last_updated.desc())
+        .all()
+    )
     status_counts = {}
     for a in apps:
         status_counts[a.current_status] = status_counts.get(a.current_status, 0) + 1
