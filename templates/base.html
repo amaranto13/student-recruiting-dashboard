@@ -108,7 +108,7 @@
       <span class="navbar-toggler-icon"></span>
     </button>
     <div class="collapse navbar-collapse" id="navMenu">
-      <ul class="navbar-nav ms-auto">
+      <ul class="navbar-nav ms-auto align-items-lg-center">
         <li class="nav-item">
           <a class="nav-link {% if request.endpoint == 'applications' %}active{% endif %}"
              href="{{ url_for('applications') }}">Applications</a>
@@ -125,6 +125,20 @@
           <a class="nav-link {% if request.endpoint == 'status_history' %}active{% endif %}"
              href="{{ url_for('status_history') }}">Status &amp; History</a>
         </li>
+        {% if session.get('user_code') %}
+        <li class="nav-item ms-lg-3 mt-2 mt-lg-0">
+          <div class="d-flex align-items-center gap-2">
+            <span class="text-white-50 small">
+              <i class="bi bi-person-circle me-1"></i>{{ session['user_code'] }}
+            </span>
+            <form method="POST" action="{{ url_for('change_user') }}" class="d-inline m-0">
+              <button type="submit" class="btn btn-outline-light btn-sm py-0 px-2">
+                Change User
+              </button>
+            </form>
+          </div>
+        </li>
+        {% endif %}
       </ul>
     </div>
   </div>
